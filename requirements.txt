@@ -1,2 +1,5 @@
-requests
+streamlit
+numpy
+opencv-python-headless
+pillow
 plotly
