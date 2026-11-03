@@ -1,207 +1,148 @@
-
-# 어제의 박스오피스 — KOBIS 일별 박스오피스 API
-# 초보자 안내:
-# 1. Streamlit Cloud의 Settings > Secrets에 KOBIS_KEY를 등록합니다.
-# 2. 실제 인증키는 코드에 직접 적지 않습니다.
-# 3. requirements.txt에 추가 라이브러리를 적습니다.
-
-import datetime
-import requests
-import pandas as pd
-import plotly.express as px
 import streamlit as st
+import numpy as np
+import cv2
+from PIL import Image
+import plotly.express as px
 
-st.set_page_config(page_title="어제의 박스오피스", page_icon="🎬", layout="wide")
-
-API_URL = (
-    "https://www.kobis.or.kr/kobisopenapi/webservice/rest/"
-    "boxoffice/searchDailyBoxOfficeList.json"
+# 1. 페이지 기본 설정
+st.set_page_config(
+    page_title="인공지능 사진 구분",
+    page_icon="🔍",
+    layout="wide"
 )
 
-# 서버 시간대와 관계없이 한국 시간(UTC+9) 기준으로 어제를 계산합니다.
-KST = datetime.timezone(datetime.timedelta(hours=9))
-today_kst = datetime.datetime.now(KST).date()
-yesterday = today_kst - datetime.timedelta(days=1)
+# 2. 메인 타이틀
+st.title("인공지능 사진 구분")
+st.caption("빅데이터 기반 주파수 스펙트럼(FFT) 분석을 통해 실제 카메라 사진과 AI 생성 이미지를 판별합니다.")
 
-st.title("🎬 일별 박스오피스")
-st.caption("달력에서 날짜를 선택하세요. 가장 늦게 선택할 수 있는 날짜는 한국 시간 기준 어제입니다.")
-selected_date = st.date_input(
-    "조회 날짜",
-    value=yesterday,
-    min_value=datetime.date(2004, 1, 1),
-    max_value=yesterday,
-    format="YYYY/MM/DD"
-)
-target_dt = selected_date.strftime("%Y%m%d")
-display_date = selected_date.strftime("%Y년 %m월 %d일")
+st.markdown("---")
 
-# 인증키는 Streamlit 비밀 금고(Secrets)에서만 불러옵니다.
-try:
-    API_KEY = st.secrets["KOBIS_KEY"]
-except Exception:
-    st.error("🔐 KOBIS 인증키를 찾을 수 없습니다.")
-    st.markdown(
-        "Streamlit Cloud의 **Settings → Secrets**에 `KOBIS_KEY`가 등록되어 있는지 확인하세요."
-    )
-    st.code('KOBIS_KEY = "발급받은_인증키"', language="toml")
-    st.stop()
+# 3. 사진이 구별되는 이유 및 예시 그래프
+st.header("💡 사진이 구별되는 이유와 주파수 모양 예시")
+st.write("사람의 눈으로는 구별하기 힘든 AI 사진도, 픽셀 데이터(빅데이터)를 주파수 영역으로 변환하면 형태 차이가 뚜렷하게 나타납니다.")
 
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_boxoffice(date_text, api_key):
-    """KOBIS API를 호출해 JSON 응답을 가져옵니다."""
-    response = requests.get(
-        API_URL,
-        params={"key": api_key, "targetDt": date_text},
-        timeout=20
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-# 요청 실패 시 빈 화면 대신 원인과 확인 방법을 표시합니다.
-try:
-    with st.spinner("KOBIS에서 데이터를 불러오는 중입니다..."):
-        data = fetch_boxoffice(target_dt, str(API_KEY).strip())
-except requests.exceptions.Timeout:
-    st.error("⏱️ KOBIS 서버 응답 시간이 초과되었습니다.")
-    st.info("인터넷 연결을 확인하고 잠시 후 새로고침해 주세요.")
-    st.stop()
-except requests.exceptions.HTTPError as error:
-    st.error("🌐 KOBIS 서버가 HTTP 오류를 반환했습니다.")
-    st.write(f"오류 내용: {error}")
-    st.info("KOBIS 서비스 상태와 요청 주소를 확인해 주세요.")
-    st.stop()
-except requests.exceptions.RequestException as error:
-    st.error("🌐 KOBIS 서버에 연결하지 못했습니다.")
-    st.write(f"오류 내용: {error}")
-    st.info("인터넷 연결, 방화벽, KOBIS API 서비스 상태를 확인해 주세요.")
-    st.stop()
-except ValueError:
-    st.error("📦 KOBIS 응답을 JSON으로 읽지 못했습니다.")
-    st.info("잠시 후 다시 시도하거나 KOBIS API 상태를 확인해 주세요.")
-    st.stop()
-except Exception as error:
-    st.error("예상하지 못한 문제가 발생했습니다.")
-    st.write(f"오류 내용: {error}")
-    st.info("앱 설정과 실행 로그를 확인해 주세요.")
-    st.stop()
-
-# 인증키가 틀려도 HTTP 상태코드가 200일 수 있으므로 faultInfo를 확인합니다.
-if not isinstance(data, dict):
-    st.error("KOBIS에서 예상한 형식의 데이터를 받지 못했습니다.")
-    st.info("잠시 후 다시 시도하고 KOBIS API 응답을 확인해 주세요.")
-    st.stop()
-
-if "faultInfo" in data:
-    fault = data.get("faultInfo") or {}
-    if isinstance(fault, dict):
-        code = fault.get("errorCode", "정보 없음")
-        message = fault.get("message", "오류 메시지가 없습니다.")
+def generate_sample_spectrum(pattern_type="real"):
+    size = 200
+    x = np.linspace(-1, 1, size)
+    y = np.linspace(-1, 1, size)
+    X, Y = np.meshgrid(x, y)
+    R = np.sqrt(X**2 + Y**2)
+    
+    if pattern_type == "real":
+        spectrum = np.exp(-R * 3) + np.random.normal(0, 0.04, (size, size))
     else:
-        code, message = "정보 없음", str(fault)
-    st.error("🚨 KOBIS API가 오류 정보를 반환했습니다.")
-    st.write(f"오류 코드: {code}")
-    st.write(f"오류 메시지: {message}")
-    st.markdown(
-        "**확인할 사항:** Secrets의 이름이 `KOBIS_KEY`인지, 인증키가 올바른지, "
-        "조회 날짜가 `YYYYMMDD` 형식인지 확인하세요."
-    )
-    st.stop()
+        grid = (np.sin(X * 25) ** 2) * (np.cos(Y * 25) ** 2)
+        spectrum = np.exp(-R * 2.5) + grid * 0.35 + np.random.normal(0, 0.02, (size, size))
+    
+    return np.clip(spectrum, 0, 1)
 
-boxoffice_result = data.get("boxOfficeResult", {})
-if not isinstance(boxoffice_result, dict):
-    boxoffice_result = {}
-movies = boxoffice_result.get("dailyBoxOfficeList", [])
+col_exp1, col_exp2 = st.columns(2)
 
-if not movies:
-    st.warning("📭 그날은 아직 집계 전입니다.")
-    st.info(
-        "KOBIS에서 해당 날짜의 박스오피스 집계를 완료했는지 확인해 주세요. "
-        "날짜를 다시 선택하거나 잠시 후 새로고침할 수 있습니다."
-    )
-    st.stop()
+with col_exp1:
+    st.subheader("📷 실제 카메라 사진")
+    st.markdown("""
+    - **원인:** 빛이 동그란 렌즈를 통과해 센서(CMOS)에 찍힐 때 발생하는 **자연스러운 센서 노이즈**
+    - **주파수 특징:** 중심(저주파)에서 외곽(고주파)으로 **부드러운 동그란 원형**으로 퍼집니다.
+    """)
+    real_sample = generate_sample_spectrum("real")
+    fig_real = px.imshow(real_sample, color_continuous_scale="gray", title="[예시] 실제 사진의 동그란 주파수 스펙트럼")
+    fig_real.update_layout(coloraxis_showscale=False, height=260, margin=dict(l=10, r=10, b=10, t=40))
+    st.plotly_chart(fig_real, use_container_width=True)
 
-df = pd.DataFrame(movies)
+with col_exp2:
+    st.subheader("🤖 인공지능 생성 사진")
+    st.markdown("""
+    - **원인:** AI 생성 알고리즘(Diffusion 등)이 픽셀을 연산하고 복원할 때 남는 **수학적 격자 잔상**
+    - **주파수 특징:** 외곽 영역에 **십자가(+) 및 규칙적인 점/격자 패턴**이 나타납니다.
+    """)
+    ai_sample = generate_sample_spectrum("ai")
+    fig_ai = px.imshow(ai_sample, color_continuous_scale="gray", title="[예시] AI 사진의 규칙적인 격자 주파수 스펙트럼")
+    fig_ai.update_layout(coloraxis_showscale=False, height=260, margin=dict(l=10, r=10, b=10, t=40))
+    st.plotly_chart(fig_ai, use_container_width=True)
 
-# 필요한 항목이 응답에 있는지 먼저 확인합니다.
-required = ["rank", "rankInten", "movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"]
-missing = [column for column in required if column not in df.columns]
-if missing:
-    st.error("KOBIS 응답에 필요한 항목이 없습니다: " + ", ".join(missing))
-    st.info("KOBIS API 응답 구조가 변경되었는지 공식 문서를 확인해 주세요.")
-    st.stop()
+st.markdown("---")
 
-# 숫자가 문자열로 오므로 정수로 변환합니다.
-for column in ["rank", "rankInten", "audiCnt", "audiAcc", "scrnCnt"]:
-    df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0).astype(int)
+# 4. 범용 주파수 스펙트럼 분석 알고리즘
+def analyze_general_spectrum(img_array):
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_array
 
-df["movieNm"] = df["movieNm"].fillna("영화명 없음").astype(str)
-df["openDt"] = df["openDt"].fillna("-").replace("", "-").astype(str)
+    # 512x512 고정 해상도로 규격화
+    gray = cv2.resize(gray, (512, 512))
 
-# 누적 관객수가 100만 명을 초과한 영화명에는 트로피 이모지를 붙입니다.
-df["표시 영화명"] = df.apply(
-    lambda row: f"{row['movieNm']} 🏆" if row["audiAcc"] > 1_000_000 else row["movieNm"],
-    axis=1
-)
+    # 2D 푸리에 변환
+    f = np.fft.fft2(gray)
+    fshift = np.fft.fftshift(f)
+    magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1e-8)
+    
+    mag_norm = cv2.normalize(magnitude_spectrum, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-# 전일 대비 순위 변동: 양수는 상승(빨간 ↑), 음수는 하락(파란 ↓)입니다.
-def format_rank_change(value):
-    if value > 0:
-        return f"↑ {value}"
-    if value < 0:
-        return f"↓ {abs(value)}"
-    return "— 0"
+    # 피사체 폼(중심부 저주파) 마스킹 처리
+    h, w = mag_norm.shape
+    cy, cx = h // 2, w // 2
+    cv2.circle(mag_norm, (cx, cy), 40, 0, -1)
 
-df["순위 변동"] = df["rankInten"].map(format_rank_change)
-df = df.sort_values("rank").reset_index(drop=True)
+    # 각도별 주파수 에너지 편향성(방향성 격자 특성) 연산
+    # 실제 사진은 각도별 편차가 적고(동그람), AI 사진은 특정 각도로 에너지 쏠림 현상 발생
+    angles = np.linspace(0, np.pi, 180, endpoint=False)
+    polar_energies = []
+    
+    for angle in angles:
+        # 주요 대각선 및 수직/수평 각도 스캔
+        dx = np.cos(angle)
+        dy = np.sin(angle)
+        sample_line = [mag_norm[int(cy + r * dy), int(cx + r * dx)] for r in range(50, 200)]
+        polar_energies.append(np.mean(sample_line))
 
-# 1위 영화의 주요 지표 세 가지를 크게 보여 줍니다.
-first = df.iloc[0]
-st.subheader(f"🥇 {display_date} 1위 — {first['표시 영화명']}")
-c1, c2, c3 = st.columns(3)
-c1.metric("관객수", f"{first['audiCnt']:,}명")
-c2.metric("누적 관객수", f"{first['audiAcc']:,}명")
-c3.metric("스크린수", f"{first['scrnCnt']:,}개")
+    # 방향성 편향도(표준편차/평균) 계산
+    bias_score = np.std(polar_energies) / (np.mean(polar_energies) + 1e-5)
 
-# 순위 변동을 색으로 구분해 표에 표시합니다.
-st.subheader("📋 박스오피스 순위")
-table = df[["rank", "순위 변동", "표시 영화명", "openDt", "audiCnt", "audiAcc", "scrnCnt"]].copy()
-table.columns = ["순위", "전일 대비", "영화명", "개봉일", "관객수", "누적관객", "스크린수"]
-for column in ["관객수", "누적관객", "스크린수"]:
-    table[column] = table[column].map(lambda value: f"{value:,}")
+    # 범용 임계치 적용 확률 스케일링
+    ai_prob = min(max((bias_score - 0.22) * 250 + 50, 3.0), 97.0)
+    real_prob = 100.0 - ai_prob
 
-def color_rank_change(value):
-    if isinstance(value, str) and value.startswith("↑"):
-        return "color: #e53935; font-weight: bold;"
-    if isinstance(value, str) and value.startswith("↓"):
-        return "color: #1976d2; font-weight: bold;"
-    return "color: #777777;"
+    return mag_norm, ai_prob, real_prob, bias_score
 
-st.dataframe(
-    table.style.map(color_rank_change, subset=["전일 대비"]),
-    hide_index=True,
-    use_container_width=True
-)
+# 5. 실시간 업로드 분석
+st.header("🔍 직접 사진 업로드하여 분석하기")
+uploaded_file = st.file_uploader("인터넷이나 외부에서 가져온 사진을 업로드해 보세요 (JPG, PNG)", type=["jpg", "jpeg", "png"])
 
-# 관객수 상위 5편을 막대그래프로 표시합니다.
-st.subheader("📊 관객수 상위 5편")
-top5 = df.nlargest(5, "audiCnt").sort_values("audiCnt", ascending=True)
-chart = px.bar(
-    top5,
-    x="audiCnt",
-    y="표시 영화명",
-    orientation="h",
-    labels={"audiCnt": "관객수(명)", "표시 영화명": "영화명"},
-    text="audiCnt"
-)
-chart.update_traces(texttemplate="%{text:,}", textposition="outside", cliponaxis=False)
-chart.update_layout(
-    yaxis_title="",
-    xaxis_title="관객수(명)",
-    margin=dict(l=10, r=40, t=20, b=10)
-)
-st.plotly_chart(chart, use_container_width=True)
+if uploaded_file is not None:
+    image = Image.open(uploaded_file)
+    img_array = np.array(image)
 
-st.caption("데이터 출처: 영화관입장권통합전산망(KOBIS) 일별 박스오피스 API")
-  
+    # 분석
+    mag_spectrum, ai_prob, real_prob, bias_score = analyze_general_spectrum(img_array)
+
+    col1, col2, col3 = st.columns([1, 1, 1.2])
+
+    with col1:
+        st.subheader("1. 입력된 사진")
+        st.image(image, use_container_width=True)
+
+    with col2:
+        st.subheader("2. 실시간 추출 주파수")
+        fig_user = px.imshow(mag_spectrum, color_continuous_scale="gray")
+        fig_user.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, b=0, t=0))
+        st.plotly_chart(fig_user, use_container_width=True)
+        st.caption("▲ 상단 예시와 형태(동그라미 vs 격자/십자가)를 비교해 보세요.")
+
+    with col3:
+        st.subheader("3. 판별 결과")
+        
+        if ai_prob > 50:
+            st.error("🤖 **[인공지능 생성 사진]으로 구분되었습니다.**")
+            st.caption("고주파 영역에서 특정 방향으로 치우친 격자 연산 특성이 감지되었습니다.")
+        else:
+            st.success("📷 **[실제 카메라 사진]으로 구분되었습니다.**")
+            st.caption("고주파 영역이 동그랗고 균일하게 퍼진 광학 센서 특성을 보입니다.")
+
+        st.progress(int(ai_prob))
+        st.write(f"• **인공지능 사진 확률:** `{ai_prob:.1f}%`")
+        st.write(f"• **실제 사진 확률:** `{real_prob:.1f}%`")
+        st.write(f"• **주파수 방향성 편향 수치:** `{bias_score:.3f}`")
+
+else:
+    st.info("👆 준비하신 아무 실제 사진이나 AI 사진을 올려서 실시간으로 주파수를 분석해 보세요.")
