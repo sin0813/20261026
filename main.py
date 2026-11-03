@@ -87,4 +87,58 @@ def analyze_balanced_spectrum(img_array):
     for angle in angles:
         rad = np.deg2rad(angle)
         xs = (cx + np.linspace(40, 180, 50) * np.cos(rad)).astype(np.int32)
-        ys = (cy + np.linspace(40, 1
+        ys = (cy + np.linspace(40, 180, 50) * np.sin(rad)).astype(np.int32)
+        valid_mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        angle_energies.append(np.mean(mag_norm[ys[valid_mask], xs[valid_mask]]))
+
+    # 방향성 편향 수치 (안정적 기준선 0.055)
+    bias_score = np.std(angle_energies) / (np.mean(angle_energies) + 1e-5)
+
+    # 확률 계산 (억울한 오판 최소화)
+    ai_prob = min(max((bias_score - 0.055) * 800 + 50, 1.0), 99.0)
+    real_prob = 100.0 - ai_prob
+
+    display_map = mag_norm.astype(np.uint8).copy()
+    cv2.circle(display_map, (cx, cy), 40, 0, -1)
+
+    return display_map, ai_prob, real_prob, bias_score
+
+# 5. UI 및 결과
+st.header("🔍 사진 업로드 및 분석")
+uploaded_file = st.file_uploader("분석할 사진을 업로드하세요 (JPG, PNG)", type=["jpg", "jpeg", "png"])
+
+if uploaded_file is not None:
+    image = Image.open(uploaded_file)
+    img_array = np.array(image)
+
+    mag_spectrum, ai_prob, real_prob, bias_score = analyze_balanced_spectrum(img_array)
+
+    col1, col2, col3 = st.columns([1, 1, 1.2])
+
+    with col1:
+        st.subheader("1. 입력된 사진")
+        st.image(image, use_container_width=True)
+
+    with col2:
+        st.subheader("2. 주파수 스펙트럼 Map")
+        fig_user = px.imshow(mag_spectrum, color_continuous_scale="gray")
+        fig_user.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, b=0, t=0))
+        st.plotly_chart(fig_user, use_container_width=True)
+
+    with col3:
+        st.subheader("3. 분석 및 판별 결과")
+        
+        if ai_prob > 50:
+            st.error("🤖 **[인공지능 생성 사진]으로 구분되었습니다.**")
+            st.caption("주파수 고주파 영역에서 특정 방향으로 치우친 격자 연산 특성이 감지되었습니다.")
+        else:
+            st.success("📷 **[실제 카메라 사진]으로 구분되었습니다.**")
+            st.caption("주파수 스펙트럼이 원형을 유지하며 자연스러운 광학 센서 특성을 보입니다.")
+
+        st.progress(int(ai_prob))
+        st.write(f"• **인공지능 사진 확률:** `{ai_prob:.1f}%`")
+        st.write(f"• **실제 사진 확률:** `{real_prob:.1f}%`")
+        st.write(f"• **방향성 편향 수치:** `{bias_score:.4f}`")
+
+else:
+    st.info("👆 사진을 올려주시면 주파수 스펙트럼을 그려내어 분석을 진행합니다.")
